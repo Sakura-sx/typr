@@ -57,10 +57,28 @@ python3 main.py --words 100
 python3 main.py --forever
 ```
 
+### Running with Docker
+#### Using pre-built image (recommended)
+```bash
+# Run the latest version
+docker run -it --rm ghcr.io/imperatormarsa/typr
+
+# Run with custom options
+docker run -it --rm ghcr.io/imperatormarsa/typr python3 main.py --time 60 --forgive-errors
+```
+
+#### Building from source
+```bash
+# Build the Docker image
+docker build -t typr .
+
+# Run the container
+docker run -it --rm typr
+```
+
 ## Roadmap
 - [ ] Add a setting for the wordlist.
 - [ ] Add a setting for the language.
-
 
 ## Contributing
 
