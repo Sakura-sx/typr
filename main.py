@@ -5,6 +5,7 @@ import json
 import os
 from datetime import datetime
 import sys
+import urllib.request
 
 letter_shown = {}
 n_letter_shown = {}
@@ -68,7 +69,8 @@ settings = {
     "default_words_limit": 10,
     "show_wpm_live": True,
     "auto_save_results": True,
-    "min_accuracy_to_save": 0.5
+    "min_accuracy_to_save": 0.5,
+    "custom_word_file": ""
 }
 
 def load_settings():
@@ -110,6 +112,123 @@ def reset_all_data():
         return True
     except Exception:
         return False
+
+def load_custom_words(filepath):
+    """Load words/tokens from a custom file (word list or code/text file).
+
+    Each non-empty whitespace-delimited token is treated as a word.
+    Only printable ASCII characters (32-126) are kept per token; tokens
+    that become empty after filtering are discarded.
+    """
+    try:
+        with open(os.path.expanduser(filepath), "r", encoding="utf-8", errors="replace") as f:
+            raw = f.read()
+    except IOError as e:
+        return [], str(e)
+
+    tokens = raw.split()
+    words = []
+    for token in tokens:
+        cleaned = "".join(ch for ch in token if 32 <= ord(ch) <= 126)
+        if cleaned:
+            words.append(cleaned)
+
+    if not words:
+        return [], "File is empty or contains no printable ASCII text."
+    return words, None
+
+
+def load_custom_text(filepath):
+    """Load text from a local file path or a URL (http/https).
+    Tabs are expanded to 4 spaces. Non-printable characters (except \\n) are dropped.
+    Returns (text, error).
+    """
+    try:
+        if filepath.startswith("http://") or filepath.startswith("https://"):
+            req = urllib.request.Request(
+                filepath,
+                headers={"User-Agent": "typr/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+        else:
+            with open(os.path.expanduser(filepath), "r", encoding="utf-8", errors="replace") as f:
+                raw = f.read()
+    except Exception as e:
+        return "", str(e)
+
+    lines = []
+    for line in raw.splitlines():
+        line = line.replace('\t', '    ')
+        cleaned = "".join(ch for ch in line if 32 <= ord(ch) <= 126)
+        lines.append(cleaned)
+
+    # Strip trailing blank lines, keep internal structure
+    while lines and not lines[-1]:
+        lines.pop()
+
+    text = "\n".join(lines)
+    if not text.strip():
+        return "", "File is empty or contains no printable ASCII text."
+    return text, None
+
+
+def input_dialog(stdscr, prompt, initial=""):
+    """Simple single-line text input inside a curses screen.
+    Returns the entered string, or None if the user pressed ESC.
+    """
+    curses.curs_set(1)
+    max_y, max_x = stdscr.getmaxyx()
+    center_y = max_y // 2
+    center_x = max_x // 2
+
+    buf = list(initial)
+
+    while True:
+        stdscr.clear()
+        prompt_x = center_x - len(prompt) // 2
+        try:
+            stdscr.addstr(center_y - 1, prompt_x, prompt)
+        except curses.error:
+            pass
+
+        display = "".join(buf)
+        box_width = min(max_x - 4, 70)
+        box_x = center_x - box_width // 2
+
+        # Draw input box
+        try:
+            stdscr.addstr(center_y, box_x - 1, "[")
+            stdscr.addstr(center_y, box_x + box_width, "]")
+            visible = display[-(box_width):]
+            stdscr.addstr(center_y, box_x, visible.ljust(box_width))
+            # Place cursor
+            stdscr.move(center_y, box_x + len(visible))
+        except curses.error:
+            pass
+
+        hint = "Enter: confirm | ESC: cancel | Backspace: delete"
+        hint_x = center_x - len(hint) // 2
+        try:
+            stdscr.addstr(center_y + 2, hint_x, hint, curses.color_pair(4))
+        except curses.error:
+            pass
+
+        stdscr.refresh()
+        key = stdscr.getch()
+
+        if key == 27:  # ESC
+            curses.curs_set(0)
+            return None
+        elif key in (10, 13):  # Enter
+            curses.curs_set(0)
+            return "".join(buf)
+        elif key in (curses.KEY_BACKSPACE, 8, 127):
+            if buf:
+                buf.pop()
+        elif 32 <= key <= 126:
+            buf.append(chr(key))
+
 
 def load_user_data():
     global letter_shown, letter_correct, letter_accuracy, letter_time_total, letter_time_count, letter_wpm
@@ -199,52 +318,73 @@ def typing_test(stdscr):
         stdscr.getch()
         return
     
-    with open("words.txt", "r") as f:
-        possible_words = [word.strip() for word in f.readlines()]
-    
-    calculate_letter_stats()
+    if test_type == "custom":
+        custom_path = settings.get("custom_word_file", "").strip()
+        if not custom_path:
+            stdscr.addstr(0, 0, "No custom file set. Go to Settings > Custom Word File.")
+            stdscr.addstr(1, 0, "Press any key to return to menu...")
+            stdscr.refresh()
+            stdscr.getch()
+            return
+        words_to_type, err = load_custom_text(custom_path)
+        if err:
+            stdscr.addstr(0, 0, f"Error loading custom file: {err}")
+            stdscr.addstr(1, 0, "Press any key to return to menu...")
+            stdscr.refresh()
+            stdscr.getch()
+            return
+        possible_words = []  # not used in custom mode
+        word_weight = {}
+    else:
+        with open("words.txt", "r") as f:
+            possible_words = [word.strip() for word in f.readlines()]
 
-    for i in range(32, 127):
-        char = chr(i)
-        n_letter_shown[char] = 0
-        n_letter_correct[char] = 0
-        n_letter_accuracy[char] = 0.0
-    
-    for letter in letter_accuracy:
-        inverse_letter_accuracy[letter] = 1 / letter_accuracy[letter] if letter_accuracy[letter] > 0 else 1.0
-    
-    for letter in letter_accuracy:
-        if letter in letter_frequency:
-            wpm_weight = 1.0 / (letter_wpm[letter] + 0.1)
-            letter_weight[letter] = (inverse_letter_accuracy[letter] * 
-                                   letter_frequency[letter] * 
-                                   wpm_weight)
-        else:
-            letter_weight[letter] = 1.0
+        # Deduplicate while preserving order so word_weight keys always match possible_words
+        possible_words = list(dict.fromkeys(w for w in possible_words if w))
 
-    word_weight = {word: 1 for word in possible_words}
-    for word in possible_words:
-        for letter in word:
-            if letter_accuracy[letter] > 0:
-                word_weight[word] = word_weight[word] + letter_weight[letter]
+        calculate_letter_stats()
+
+        for i in range(32, 127):
+            char = chr(i)
+            n_letter_shown[char] = 0
+            n_letter_correct[char] = 0
+            n_letter_accuracy[char] = 0.0
+
+        for letter in letter_accuracy:
+            inverse_letter_accuracy[letter] = 1 / letter_accuracy[letter] if letter_accuracy[letter] > 0 else 1.0
+
+        for letter in letter_accuracy:
+            if letter in letter_frequency:
+                wpm_weight = 1.0 / (letter_wpm[letter] + 0.1)
+                letter_weight[letter] = (inverse_letter_accuracy[letter] *
+                                       letter_frequency[letter] *
+                                       wpm_weight)
             else:
-                word_weight[word] = word_weight[word] + letter_weight[letter] * 2
-        word_weight[word] = word_weight[word] / len(word)
-    
-    words_to_type = ""
-    word_count = 0
-    target_words = words_limit if test_type == "words" else 50
-    
-    for _ in range(target_words):
-        word = random.choices(possible_words, weights=word_weight.values(), k=1)[0]
-        test_text = words_to_type + (" " if words_to_type else "") + word
-        words_to_type = test_text
-        word_count += 1
-        if test_type == "words" and word_count >= target_words:
-            break
-    
-    if not words_to_type:
-        words_to_type = "hello world test"
+                letter_weight[letter] = 1.0
+
+        word_weight = {word: 1 for word in possible_words}
+        for word in possible_words:
+            for letter in word:
+                if letter_accuracy[letter] > 0:
+                    word_weight[word] = word_weight[word] + letter_weight[letter]
+                else:
+                    word_weight[word] = word_weight[word] + letter_weight[letter] * 2
+            word_weight[word] = word_weight[word] / len(word)
+
+        words_to_type = ""
+        word_count = 0
+        target_words = words_limit if test_type == "words" else 50
+
+        for _ in range(target_words):
+            word = random.choices(possible_words, weights=word_weight.values(), k=1)[0]
+            test_text = words_to_type + (" " if words_to_type else "") + word
+            words_to_type = test_text
+            word_count += 1
+            if test_type == "words" and word_count >= target_words:
+                break
+
+        if not words_to_type:
+            words_to_type = "hello world test"
     
     def safe_addstr(y, x, text, attr=0):
         try:
@@ -270,6 +410,9 @@ def typing_test(stdscr):
         status_text = "Forever mode - Press ESC to quit, any key to start"
     elif test_type == "settings":
         status_text = "Settings - Press ESC to exit"
+    elif test_type == "custom":
+        fname = os.path.basename(settings.get("custom_word_file", "custom"))
+        status_text = f"Custom: {fname} ({words_limit} words) - Press any key to start"
     else:
         status_text = f"Words to type: {words_limit}"
     status_x = center_x - len(status_text) // 2
@@ -293,52 +436,123 @@ def typing_test(stdscr):
     test_finished = False
     typing_started = False
     
+    def build_rows(text, width):
+        """Split text into visual rows of at most width chars, breaking at \\n.
+        Returns list of (row_str, flat_start, ends_with_newline).
+        flat_start is the index in `text` where row_str begins.
+        ends_with_newline is True when a \\n follows this row in the original text.
+        """
+        rows = []
+        pos = 0
+        n = len(text)
+        while pos < n:
+            next_nl = text.find('\n', pos)
+            if next_nl == -1:
+                next_nl = n
+            has_nl = next_nl < n
+            line = text[pos:next_nl]
+            if not line:
+                rows.append(('', pos, has_nl))
+                pos = next_nl + 1
+                continue
+            while len(line) > width:
+                rows.append((line[:width], pos, False))
+                pos += width
+                line = line[width:]
+            rows.append((line, pos, has_nl))
+            pos = next_nl + 1
+        if not rows:
+            rows.append(('', 0, False))
+        return rows
+
     def update_display():
-        """Update the 3-row text display"""
+        """Update the 3-row text display (handles both flat and newline text)."""
         for row in range(3):
             try:
                 stdscr.move(start_row + row, 0)
                 stdscr.clrtoeol()
             except curses.error:
                 pass
-        
+
         chars_per_row = row_width
-        
-        current_row = len(user_input) // chars_per_row
-        display_start_row = max(0, current_row - 1) if current_row > 0 else 0
-        display_start = display_start_row * chars_per_row
-        
-        remaining_text = words_to_type[display_start:]
-        typed_text = user_input[display_start:]
-        
-        for row in range(3):
-            row_start = row * chars_per_row
-            row_end = (row + 1) * chars_per_row
-            
-            row_target = remaining_text[row_start:row_end] if row_start < len(remaining_text) else ""
-            row_typed = typed_text[row_start:row_end] if row_start < len(typed_text) else ""
-            
-            if not row_target:
-                continue
-                
-            for i, char in enumerate(row_typed):
-                if i < len(row_target):
-                    color = curses.color_pair(2) if char == row_target[i] else curses.color_pair(3)
-                    safe_addstr(start_row + row, text_start_x + i, char, color)
-            
-            remaining = row_target[len(row_typed):]
-            if remaining:
-                absolute_pos = display_start + row_start + len(row_typed)
-                
-                if absolute_pos == len(user_input) and len(user_input) < len(words_to_type):
-                    next_char = remaining[0]
-                    safe_addstr(start_row + row, text_start_x + len(row_typed), next_char, 
-                              curses.color_pair(5) | curses.A_UNDERLINE | curses.A_BOLD)
-                    rest = remaining[1:]
-                    if rest:
-                        safe_addstr(start_row + row, text_start_x + len(row_typed) + 1, rest, curses.color_pair(4))
+
+        if '\n' not in words_to_type:
+            # Fast path: original flat-text logic
+            current_row = len(user_input) // chars_per_row
+            display_start_row = max(0, current_row - 1) if current_row > 0 else 0
+            display_start = display_start_row * chars_per_row
+
+            remaining_text = words_to_type[display_start:]
+            typed_text = user_input[display_start:]
+
+            for row in range(3):
+                row_start = row * chars_per_row
+                row_end = (row + 1) * chars_per_row
+
+                row_target = remaining_text[row_start:row_end] if row_start < len(remaining_text) else ""
+                row_typed = typed_text[row_start:row_end] if row_start < len(typed_text) else ""
+
+                if not row_target:
+                    continue
+
+                for i, char in enumerate(row_typed):
+                    if i < len(row_target):
+                        color = curses.color_pair(2) if char == row_target[i] else curses.color_pair(3)
+                        safe_addstr(start_row + row, text_start_x + i, char, color)
+
+                remaining = row_target[len(row_typed):]
+                if remaining:
+                    absolute_pos = display_start + row_start + len(row_typed)
+                    if absolute_pos == len(user_input) and len(user_input) < len(words_to_type):
+                        next_char = remaining[0]
+                        safe_addstr(start_row + row, text_start_x + len(row_typed), next_char,
+                                  curses.color_pair(5) | curses.A_UNDERLINE | curses.A_BOLD)
+                        rest = remaining[1:]
+                        if rest:
+                            safe_addstr(start_row + row, text_start_x + len(row_typed) + 1, rest, curses.color_pair(4))
+                    else:
+                        safe_addstr(start_row + row, text_start_x + len(row_typed), remaining, curses.color_pair(4))
+            return
+
+        # Newline-aware path
+        target_rows = build_rows(words_to_type, chars_per_row)
+        typed_len = len(user_input)
+
+        # Find which visual row contains the cursor
+        current_vrow = len(target_rows) - 1
+        for idx, (row_str, flat_start, has_nl) in enumerate(target_rows):
+            row_end = flat_start + len(row_str) + (1 if has_nl else 0)
+            if typed_len < row_end:
+                current_vrow = idx
+                break
+
+        display_start_vrow = max(0, current_vrow - 1) if current_vrow > 0 else 0
+
+        for row_offset in range(3):
+            vrow_idx = display_start_vrow + row_offset
+            if vrow_idx >= len(target_rows):
+                break
+
+            row_str, flat_start, has_nl = target_rows[vrow_idx]
+            nl_flat = flat_start + len(row_str)  # position of \n in words_to_type (if has_nl)
+
+            # Build (display_char, flat_pos) pairs for this visual row
+            display_pairs = [(ch, flat_start + col) for col, ch in enumerate(row_str)]
+            if has_nl:
+                display_pairs.append(('↵', nl_flat))
+
+            for col, (display_ch, flat_pos) in enumerate(display_pairs):
+                if flat_pos < typed_len:
+                    typed_ch = user_input[flat_pos] if flat_pos < len(user_input) else ''
+                    target_ch = words_to_type[flat_pos]
+                    color = curses.color_pair(2) if typed_ch == target_ch else curses.color_pair(3)
+                    safe_addstr(start_row + row_offset, text_start_x + col, display_ch, color)
+                elif flat_pos == typed_len:
+                    safe_addstr(start_row + row_offset, text_start_x + col, display_ch,
+                               curses.color_pair(5) | curses.A_UNDERLINE | curses.A_BOLD)
                 else:
-                    safe_addstr(start_row + row, text_start_x + len(row_typed), remaining, curses.color_pair(4))
+                    safe_addstr(start_row + row_offset, text_start_x + col, display_ch,
+                               curses.color_pair(4))
     
     update_display()
     
@@ -381,7 +595,7 @@ def typing_test(stdscr):
                 additional_words += " " + word
             words_to_type += additional_words
         
-        if test_type == "words" and current_pos >= len(words_to_type):
+        if test_type in ("words", "custom") and current_pos >= len(words_to_type):
             test_finished = True
             break
         
@@ -400,61 +614,75 @@ def typing_test(stdscr):
             if user_input and len(user_input) > 0:
                 last_char_pos = len(user_input) - 1
                 if last_char_pos < len(words_to_type):
-                    if settings["forgive_errors"]:
-                        letter_shown[words_to_type[last_char_pos]] -= 1
-                        n_letter_shown[words_to_type[last_char_pos]] -= 1
+                    target_ch = words_to_type[last_char_pos]
+                    if target_ch in letter_shown:  # skip \n and other untracked chars
+                        if settings["forgive_errors"]:
+                            letter_shown[target_ch] -= 1
+                            n_letter_shown[target_ch] -= 1
+                        if user_input[last_char_pos] == target_ch:
+                            if not settings["forgive_errors"]:
+                                letter_shown[target_ch] -= 1
+                                n_letter_shown[target_ch] -= 1
+                            letter_correct[target_ch] -= 1
+                            n_letter_correct[target_ch] -= 1
 
-                    if user_input[last_char_pos] == words_to_type[last_char_pos]:
-                        if not settings["forgive_errors"]:
-                            letter_shown[words_to_type[last_char_pos]] -= 1
-                            n_letter_shown[words_to_type[last_char_pos]] -= 1
-                        letter_correct[words_to_type[last_char_pos]] -= 1
-                        n_letter_correct[words_to_type[last_char_pos]] -= 1
-                
                 user_input = user_input[:-1]
                 current_pos = len(user_input)
                 update_display()
-                
+
+        elif (key in (10, 13) and current_pos < len(words_to_type)
+              and words_to_type[current_pos] == '\n'):  # Enter for newline in custom text
+            char = '\n'
+            if not typing_started:
+                typing_started = True
+                start_time = time.time()
+                last_keystroke_time = time.time()
+            current_time = time.time()
+            last_keystroke_time = current_time
+            user_input += char
+            current_pos = len(user_input)
+            update_display()
+
         elif 32 <= key <= 126:  # Printable characters
             char = chr(key)
-            
+
             if not typing_started:
                 typing_started = True
                 start_time = time.time()
                 last_keystroke_time = start_time
-            
+
             current_time = time.time()
-            
+
             if settings["forgive_errors"] and current_pos < len(words_to_type) and char != words_to_type[current_pos]:
                 continue
-            
+
             if last_keystroke_time > 0:
                 keystroke_time = current_time - last_keystroke_time
             else:
                 keystroke_time = 0.0
-            
+
             user_input += char
             position = len(user_input) - 1
-            
+
             if position < len(words_to_type):
                 expected_char = words_to_type[position]
-                letter_shown[expected_char] += 1
-                n_letter_shown[expected_char] += 1
-                
-                if char == expected_char:
-                    letter_time_total[expected_char] += keystroke_time
-                    letter_time_count[expected_char] += 1
-                    
-                    letter_correct[expected_char] += 1
-                    n_letter_correct[expected_char] += 1
-                    if letter_shown[expected_char] > 0:
-                        letter_accuracy[expected_char] = letter_correct[expected_char] / letter_shown[expected_char]
-                    n_letter_accuracy[expected_char] = n_letter_correct[expected_char] / n_letter_shown[expected_char]
-                else:
-                    if letter_shown[expected_char] > 0:
-                        letter_accuracy[expected_char] = letter_correct[expected_char] / letter_shown[expected_char]
-                    n_letter_accuracy[expected_char] = n_letter_correct[expected_char] / n_letter_shown[expected_char]
-            
+                if expected_char in letter_shown:  # skip \n and other untracked chars
+                    letter_shown[expected_char] += 1
+                    n_letter_shown[expected_char] += 1
+
+                    if char == expected_char:
+                        letter_time_total[expected_char] += keystroke_time
+                        letter_time_count[expected_char] += 1
+                        letter_correct[expected_char] += 1
+                        n_letter_correct[expected_char] += 1
+                        if letter_shown[expected_char] > 0:
+                            letter_accuracy[expected_char] = letter_correct[expected_char] / letter_shown[expected_char]
+                        n_letter_accuracy[expected_char] = n_letter_correct[expected_char] / n_letter_shown[expected_char]
+                    else:
+                        if letter_shown[expected_char] > 0:
+                            letter_accuracy[expected_char] = letter_correct[expected_char] / letter_shown[expected_char]
+                        n_letter_accuracy[expected_char] = n_letter_correct[expected_char] / n_letter_shown[expected_char]
+
             last_keystroke_time = current_time
             current_pos = len(user_input)
             update_display()
@@ -565,6 +793,7 @@ def show_menu(stdscr):
         ("Words Test (10 words)", "words"),
         ("Time Test (60s)", "time"),
         ("Forever Mode (no time limit)", "forever"),
+        ("Custom Text (word list / code file)", "custom"),
         ("Settings", "settings"),
         ("Exit", "exit")
     ]
@@ -611,6 +840,14 @@ def show_menu(stdscr):
             elif selected_mode == "settings":
                 show_settings(stdscr)
                 continue
+            elif selected_mode == "custom":
+                if not settings.get("custom_word_file", "").strip():
+                    path = input_dialog(stdscr, "Enter path to your word list or code file:")
+                    if path and path.strip():
+                        settings["custom_word_file"] = path.strip()
+                        save_settings()
+                    else:
+                        continue  # cancelled, stay in menu
             return selected_mode
         elif key == 27 or key == 3:  # ESC or Ctrl+C
             exit()
@@ -627,6 +864,7 @@ def show_settings(stdscr):
         ("Show Live WPM", "show_wpm_live", ["Off", "On"]),
         ("Auto Save Results", "auto_save_results", ["Off", "On"]),
         ("Min Accuracy to Save", "min_accuracy_to_save", [0.3, 0.5, 0.7, 0.8]),
+        ("Custom Word File", "custom_word_file", []),
         ("Reset All Data", "reset_data", ["Cancel", "Confirm"]),
         ("Back to Menu", "back", [])
     ]
@@ -662,6 +900,13 @@ def show_settings(stdscr):
                 display_text = display_name
             elif setting_key == "reset_data":
                 display_text = display_name
+            elif setting_key == "custom_word_file":
+                path_val = settings.get("custom_word_file", "") or "<not set>"
+                # Truncate long paths to keep the line short
+                max_path = max(10, max_x // 2 - len(display_name) - 4)
+                if len(path_val) > max_path:
+                    path_val = "..." + path_val[-(max_path - 3):]
+                display_text = f"{display_name}: {path_val}"
             elif len(possible_values) > 0:
                 current_idx = get_current_value_index(setting_key, possible_values)
                 current_value = possible_values[current_idx]
@@ -721,6 +966,16 @@ def show_settings(stdscr):
             _, setting_key, _ = setting_options[current_selection]
             if setting_key == "back":
                 return
+            elif setting_key == "custom_word_file":
+                current_val = settings.get("custom_word_file", "")
+                new_path = input_dialog(
+                    stdscr,
+                    "Enter path to your word list or code file (empty to clear):",
+                    initial=current_val
+                )
+                if new_path is not None:  # None means ESC (cancel)
+                    settings["custom_word_file"] = new_path.strip()
+                    save_settings()
             elif setting_key == "reset_data":
                 stdscr.clear()
                 confirm_text = "Are you sure you want to reset all data? (y/N)"
@@ -862,5 +1117,14 @@ if __name__ == "__main__":
             
         if "--forever" in sys.argv:
             test_type = "forever"
-    
+
+        if "--custom" in sys.argv:
+            idx = sys.argv.index("--custom")
+            if idx + 1 < len(sys.argv):
+                settings["custom_word_file"] = sys.argv[idx + 1]
+                test_type = "custom"
+            else:
+                print("Error: --custom requires a file path argument")
+                exit(1)
+
     main()

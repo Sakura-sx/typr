@@ -4,5 +4,6 @@
   "default_words_limit": 25,
   "show_wpm_live": true,
   "auto_save_results": true,
-  "min_accuracy_to_save": 0.5
+  "min_accuracy_to_save": 0.5,
+  "custom_word_file": "main.py"
 }
