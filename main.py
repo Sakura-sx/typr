@@ -565,6 +565,7 @@ def show_menu(stdscr):
         ("Words Test (10 words)", "words"),
         ("Time Test (60s)", "time"),
         ("Forever Mode (no time limit)", "forever"),
+        ("View History", "history"),
         ("Settings", "settings"),
         ("Exit", "exit")
     ]
@@ -611,9 +612,102 @@ def show_menu(stdscr):
             elif selected_mode == "settings":
                 show_settings(stdscr)
                 continue
+            elif selected_mode == "history":
+                show_history(stdscr)
+                continue
             return selected_mode
         elif key == 27 or key == 3:  # ESC or Ctrl+C
             exit()
+
+def show_history(stdscr):
+    curses.curs_set(0)
+    stdscr.clear()
+    max_y, max_x = stdscr.getmaxyx()
+    
+    test_history = load_user_data()
+    
+    center_y = max_y // 2
+    center_x = max_x // 2
+    
+    while True:
+        stdscr.clear()
+        
+        title = "Test History"
+        title_x = center_x - len(title) // 2
+        try:
+            stdscr.addstr(center_y - 8, title_x, title, curses.A_BOLD)
+        except curses.error:
+            pass
+        
+        if not test_history:
+            no_history_text = "No test history available"
+            no_history_x = center_x - len(no_history_text) // 2
+            try:
+                stdscr.addstr(center_y, no_history_x, no_history_text)
+            except curses.error:
+                pass
+        else:
+            recent_history = test_history[-10:]
+            recent_history.reverse()
+            
+            total_wpm = 0.0
+            total_accuracy = 0.0
+            valid_count = 0
+            
+            header = "#   WPM    Accuracy   Date"
+            header_x = center_x - len(header) // 2
+            try:
+                stdscr.addstr(center_y - 6, header_x, header, curses.A_UNDERLINE)
+            except curses.error:
+                pass
+            
+            for i, record in enumerate(recent_history):
+                wpm = record.get("wpm", 0.0)
+                accuracy = record.get("accuracy", 0.0)
+                timestamp = record.get("timestamp", "")
+                
+                total_wpm += wpm
+                total_accuracy += accuracy
+                valid_count += 1
+                
+                try:
+                    dt = datetime.fromisoformat(timestamp)
+                    date_str = dt.strftime("%m-%d %H:%M")
+                except (ValueError, TypeError):
+                    date_str = "N/A"
+                
+                line = f"{i+1:2}. {wpm:6.2f}  {accuracy:6.1f}%   {date_str}"
+                line_x = center_x - len(line) // 2
+                
+                try:
+                    stdscr.addstr(center_y - 5 + i, line_x, line)
+                except curses.error:
+                    pass
+            
+            if valid_count > 0:
+                avg_wpm = total_wpm / valid_count
+                avg_accuracy = total_accuracy / valid_count
+                
+                stats_line = f"Average: {avg_wpm:.2f} WPM, {avg_accuracy:.1f}% Accuracy"
+                stats_x = center_x - len(stats_line) // 2
+                try:
+                    stdscr.addstr(center_y + 5, stats_x, stats_line, curses.A_BOLD)
+                except curses.error:
+                    pass
+        
+        back_text = "Press ESC to go back"
+        back_x = center_x - len(back_text) // 2
+        try:
+            stdscr.addstr(center_y + 7, back_x, back_text, curses.color_pair(4))
+        except curses.error:
+            pass
+        
+        stdscr.refresh()
+        
+        key = stdscr.getch()
+        
+        if key == 27 or key == 3:  # ESC or Ctrl+C
+            return
 
 def show_settings(stdscr):
     curses.curs_set(0)
