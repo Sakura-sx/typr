@@ -77,7 +77,11 @@ def load_settings():
         if os.path.exists("settings.json"):
             with open("settings.json", "r") as f:
                 loaded_settings = json.load(f)
-                settings.update(loaded_settings)
+                # A valid JSON value that is not an object (e.g. a list left
+                # behind by another program) has no settings to merge: keep
+                # the built-in defaults instead of crashing on startup.
+                if isinstance(loaded_settings, dict):
+                    settings.update(loaded_settings)
     except (json.JSONDecodeError, IOError):
         pass
 
